@@ -4,7 +4,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
 
-use async_channel::{bounded, RecvError, SendError, TryRecvError, TrySendError};
+use async_channel::{
+    bounded, bounded_with, BufferPolicy, RecvError, SendError, TryRecvError, TrySendError,
+};
 use easy_parallel::Parallel;
 use futures_lite::{future, prelude::*};
 
@@ -15,6 +17,9 @@ use wasm_bindgen_test::wasm_bindgen_test as test;
 fn ms(ms: u64) -> Duration {
     Duration::from_millis(ms)
 }
+
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
 
 #[test]
 fn smoke() {
@@ -43,6 +48,68 @@ fn smoke_blocking() {
     future::block_on(s.send(9)).unwrap();
     assert_eq!(r.recv_blocking(), Ok(9));
 
+    assert_eq!(r.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn reject_policy_async_send_returns_full_immediately() {
+    let (s, r) = bounded_with(1, BufferPolicy::Reject);
+
+    future::block_on(s.send(1)).unwrap();
+
+    let start = Instant::now();
+    let err = future::block_on(s.send(2)).unwrap_err();
+    assert!(start.elapsed() < ms(500));
+    assert!(err.is_full());
+    assert_eq!(err.into_inner(), 2);
+
+    assert_eq!(r.try_recv(), Ok(1));
+    assert_eq!(s.try_send(3), Ok(()));
+    assert_eq!(s.try_send(4), Err(TrySendError::Full(4)));
+}
+
+#[cfg(all(feature = "std", not(target_family = "wasm")))]
+#[test]
+fn reject_policy_blocking_send_returns_full_immediately() {
+    let (s, r) = bounded_with(1, BufferPolicy::Reject);
+
+    s.send_blocking(1).unwrap();
+
+    let start = Instant::now();
+    let err = s.send_blocking(2).unwrap_err();
+    assert!(start.elapsed() < ms(500));
+    assert!(err.is_full());
+    assert_eq!(err.into_inner(), 2);
+
+    assert_eq!(r.recv_blocking(), Ok(1));
+}
+
+#[cfg(all(feature = "std", not(target_family = "wasm")))]
+#[test]
+fn drop_oldest_policy_keeps_latest_messages() {
+    let (s, r) = bounded_with(2, BufferPolicy::DropOldest);
+
+    s.send_blocking(1).unwrap();
+    s.send_blocking(2).unwrap();
+    s.send_blocking(3).unwrap();
+
+    assert_eq!(r.recv_blocking(), Ok(2));
+    assert_eq!(r.recv_blocking(), Ok(3));
+    assert_eq!(r.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[cfg(all(feature = "std", not(target_family = "wasm")))]
+#[test]
+fn drop_newest_policy_keeps_queued_messages() {
+    let (s, r) = bounded_with(2, BufferPolicy::DropNewest);
+
+    s.send_blocking(1).unwrap();
+    s.send_blocking(2).unwrap();
+    s.send_blocking(3).unwrap();
+
+    assert_eq!(r.recv_blocking(), Ok(1));
+    assert_eq!(r.recv_blocking(), Ok(2));
     assert_eq!(r.try_recv(), Err(TryRecvError::Empty));
 }
 

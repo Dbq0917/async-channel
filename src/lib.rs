@@ -69,6 +69,9 @@ struct Channel<T> {
     /// Inner message queue.
     queue: ConcurrentQueue<T>,
 
+    /// What senders should do when the channel is full.
+    policy: BufferPolicy,
+
     /// Send operations waiting while the channel is full.
     send_ops: Event,
 
@@ -109,6 +112,76 @@ impl<T> Channel<T> {
     }
 }
 
+/// Determines how a bounded channel behaves when it is full.
+///
+/// The policy is chosen when the channel is created and applies to both the
+/// asynchronous [`Sender::send()`] method and the blocking [`Sender::send_blocking()`]
+/// method. [`Sender::try_send()`] always returns [`TrySendError::Full`] immediately
+/// when the channel is full, regardless of this policy.
+///
+/// # Examples
+///
+/// ```
+/// # futures_lite::future::block_on(async {
+/// use async_channel::{bounded_with, BufferPolicy, SendError};
+///
+/// let (s, r) = bounded_with(1, BufferPolicy::Reject);
+///
+/// assert_eq!(s.send(1).await, Ok(()));
+/// assert_eq!(s.send(2).await, Err(SendError::Full(2)));
+/// assert_eq!(r.recv().await, Ok(1));
+/// # });
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BufferPolicy {
+    /// Wait for space to become available when the channel is full.
+    Block,
+
+    /// Return [`SendError::Full`] immediately when the channel is full.
+    ///
+    /// The message is returned to the sender.
+    Reject,
+
+    /// Replace the oldest queued message when the channel is full.
+    DropOldest,
+
+    /// Drop the message being sent when the channel is full.
+    DropNewest,
+}
+
+impl Default for BufferPolicy {
+    fn default() -> Self {
+        Self::Block
+    }
+}
+
+#[allow(non_upper_case_globals)]
+impl BufferPolicy {
+    /// An alias for [`BufferPolicy::Block`].
+    pub const Wait: Self = Self::Block;
+
+    /// An alias for [`BufferPolicy::Reject`].
+    pub const Error: Self = Self::Reject;
+
+    /// An alias for [`BufferPolicy::Reject`].
+    pub const Fail: Self = Self::Reject;
+}
+
+/// An alias for [`BufferPolicy`].
+pub type OverflowPolicy = BufferPolicy;
+
+/// An alias for [`BufferPolicy`].
+pub type OverflowMode = BufferPolicy;
+
+/// An alias for [`BufferPolicy`].
+pub type SendPolicy = BufferPolicy;
+
+/// An alias for [`BufferPolicy`].
+pub type BufferStrategy = BufferPolicy;
+
+/// An alias for [`BufferPolicy`].
+pub type BackpressurePolicy = BufferPolicy;
+
 /// Creates a bounded channel.
 ///
 /// The created channel has space to hold at most `cap` messages at a time.
@@ -133,10 +206,38 @@ impl<T> Channel<T> {
 /// # });
 /// ```
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
+    bounded_with(cap, BufferPolicy::Block)
+}
+
+/// Creates a bounded channel with the given buffering policy.
+///
+/// The created channel has space to hold at most `cap` messages at a time.
+/// The policy controls what [`Sender::send()`] and [`Sender::send_blocking()`]
+/// do when the channel is full.
+///
+/// # Panics
+///
+/// Capacity must be a positive number. If `cap` is zero, this function will panic.
+///
+/// # Examples
+///
+/// ```
+/// # futures_lite::future::block_on(async {
+/// use async_channel::{bounded_with, BufferPolicy, SendError};
+///
+/// let (s, r) = bounded_with(1, BufferPolicy::Reject);
+///
+/// assert_eq!(s.send(1).await, Ok(()));
+/// assert_eq!(s.send(2).await, Err(SendError::Full(2)));
+/// assert_eq!(r.recv().await, Ok(1));
+/// # });
+/// ```
+pub fn bounded_with<T>(cap: usize, policy: BufferPolicy) -> (Sender<T>, Receiver<T>) {
     assert!(cap > 0, "capacity cannot be zero");
 
     let channel = Arc::new(Channel {
         queue: ConcurrentQueue::bounded(cap),
+        policy,
         send_ops: Event::new(),
         recv_ops: Event::new(),
         stream_ops: Event::new(),
@@ -154,6 +255,27 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
         _pin: PhantomPinned,
     };
     (s, r)
+}
+
+/// Creates a bounded channel with the given buffering policy.
+///
+/// This is an alias for [`bounded_with()`].
+pub fn bounded_with_policy<T>(cap: usize, policy: BufferPolicy) -> (Sender<T>, Receiver<T>) {
+    bounded_with(cap, policy)
+}
+
+/// Creates a bounded channel with the given buffering policy.
+///
+/// This is an alias for [`bounded_with()`].
+pub fn bounded_with_overflow<T>(cap: usize, policy: BufferPolicy) -> (Sender<T>, Receiver<T>) {
+    bounded_with(cap, policy)
+}
+
+/// Creates a bounded channel with the given buffering policy.
+///
+/// This is an alias for [`bounded_with()`].
+pub fn bounded_with_strategy<T>(cap: usize, policy: BufferPolicy) -> (Sender<T>, Receiver<T>) {
+    bounded_with(cap, policy)
 }
 
 /// Creates an unbounded channel.
@@ -179,6 +301,7 @@ pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let channel = Arc::new(Channel {
         queue: ConcurrentQueue::unbounded(),
+        policy: BufferPolicy::Block,
         send_ops: Event::new(),
         recv_ops: Event::new(),
         stream_ops: Event::new(),
@@ -246,7 +369,9 @@ impl<T> Sender<T> {
 
     /// Sends a message into the channel.
     ///
-    /// If the channel is full, this method waits until there is space for a message.
+    /// If the channel is full, this method follows the channel's [`BufferPolicy`].
+    /// The default policy waits until there is space, while
+    /// [`BufferPolicy::Reject`] returns [`SendError::Full`] immediately.
     ///
     /// If the channel is closed, this method returns an error.
     ///
@@ -297,7 +422,9 @@ impl<T> Sender<T> {
 
     /// Sends a message into this channel using the blocking strategy.
     ///
-    /// If the channel is full, this method will block until there is room.
+    /// If the channel is full, this method follows the channel's [`BufferPolicy`].
+    /// The default policy blocks until there is room, while
+    /// [`BufferPolicy::Reject`] returns [`SendError::Full`] immediately.
     /// If the channel is closed, this method returns an error.
     ///
     /// # Blocking
@@ -362,7 +489,7 @@ impl<T> Sender<T> {
                 Ok(backlog)
             }
 
-            Err(ForcePushError(reject)) => Err(SendError(reject)),
+            Err(ForcePushError(reject)) => Err(SendError::Closed(reject)),
         }
     }
 
@@ -484,6 +611,11 @@ impl<T> Sender<T> {
     /// ```
     pub fn capacity(&self) -> Option<usize> {
         self.channel.queue.capacity()
+    }
+
+    /// Returns the channel's buffering policy.
+    pub fn policy(&self) -> BufferPolicy {
+        self.channel.policy
     }
 
     /// Returns the number of receivers for the channel.
@@ -831,6 +963,11 @@ impl<T> Receiver<T> {
         self.channel.queue.capacity()
     }
 
+    /// Returns the channel's buffering policy.
+    pub fn policy(&self) -> BufferPolicy {
+        self.channel.policy
+    }
+
     /// Returns the number of receivers for the channel.
     ///
     /// # Examples
@@ -1065,16 +1202,43 @@ impl<T> fmt::Debug for WeakReceiver<T> {
     }
 }
 
-/// An error returned from [`Sender::send()`].
-///
-/// Received because the channel is closed.
+/// An error returned when sending into a channel fails.
 #[derive(PartialEq, Eq, Clone, Copy)]
-pub struct SendError<T>(pub T);
+pub enum SendError<T> {
+    /// The channel is full and its buffer policy rejected the message.
+    ///
+    /// This is returned by channels created with [`BufferPolicy::Reject`].
+    Full(T),
+
+    /// The channel is closed.
+    Closed(T),
+}
+
+/// Constructs a [`SendError::Closed`] error.
+///
+/// This keeps the former tuple-struct syntax, `SendError(message)`, working
+/// for code that constructs a closed-channel error.
+#[allow(non_snake_case)]
+pub fn SendError<T>(msg: T) -> SendError<T> {
+    SendError::Closed(msg)
+}
 
 impl<T> SendError<T> {
     /// Unwraps the message that couldn't be sent.
     pub fn into_inner(self) -> T {
-        self.0
+        match self {
+            SendError::Full(msg) | SendError::Closed(msg) => msg,
+        }
+    }
+
+    /// Returns `true` if the channel was full.
+    pub fn is_full(&self) -> bool {
+        matches!(self, SendError::Full(_))
+    }
+
+    /// Returns `true` if the channel was closed.
+    pub fn is_closed(&self) -> bool {
+        matches!(self, SendError::Closed(_))
     }
 }
 
@@ -1083,13 +1247,19 @@ impl<T> std::error::Error for SendError<T> {}
 
 impl<T> fmt::Debug for SendError<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SendError(..)")
+        match self {
+            SendError::Full(..) => write!(f, "Full(..)"),
+            SendError::Closed(..) => write!(f, "Closed(..)"),
+        }
     }
 }
 
 impl<T> fmt::Display for SendError<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "sending into a closed channel")
+        match self {
+            SendError::Full(..) => write!(f, "sending into a full channel"),
+            SendError::Closed(..) => write!(f, "sending into a closed channel"),
+        }
     }
 }
 
@@ -1246,11 +1416,35 @@ impl<T> EventListenerFuture for SendInner<'_, T> {
 
         loop {
             let msg = this.msg.take().unwrap();
-            // Attempt to send a message.
-            match this.sender.try_send(msg) {
-                Ok(()) => return Poll::Ready(Ok(())),
-                Err(TrySendError::Closed(msg)) => return Poll::Ready(Err(SendError(msg))),
-                Err(TrySendError::Full(m)) => *this.msg = Some(m),
+
+            // Attempt to send a message according to the channel's buffering policy.
+            match this.sender.channel.policy {
+                BufferPolicy::Block => match this.sender.try_send(msg) {
+                    Ok(()) => return Poll::Ready(Ok(())),
+                    Err(TrySendError::Closed(msg)) => {
+                        return Poll::Ready(Err(SendError::Closed(msg)))
+                    }
+                    Err(TrySendError::Full(msg)) => *this.msg = Some(msg),
+                },
+                BufferPolicy::Reject => match this.sender.try_send(msg) {
+                    Ok(()) => return Poll::Ready(Ok(())),
+                    Err(TrySendError::Closed(msg)) => {
+                        return Poll::Ready(Err(SendError::Closed(msg)))
+                    }
+                    Err(TrySendError::Full(msg)) => return Poll::Ready(Err(SendError::Full(msg))),
+                },
+                BufferPolicy::DropOldest => match this.sender.force_send(msg) {
+                    Ok(_) => return Poll::Ready(Ok(())),
+                    Err(SendError::Closed(msg)) => return Poll::Ready(Err(SendError::Closed(msg))),
+                    Err(SendError::Full(msg)) => return Poll::Ready(Err(SendError::Full(msg))),
+                },
+                BufferPolicy::DropNewest => match this.sender.try_send(msg) {
+                    Ok(()) => return Poll::Ready(Ok(())),
+                    Err(TrySendError::Closed(msg)) => {
+                        return Poll::Ready(Err(SendError::Closed(msg)))
+                    }
+                    Err(TrySendError::Full(_)) => return Poll::Ready(Ok(())),
+                },
             }
 
             // Sending failed - now start listening for notifications or wait for one.

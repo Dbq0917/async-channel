@@ -1,3 +1,10 @@
+# Unreleased
+
+- Add `BufferPolicy` and `bounded_with()` to configure full-channel behavior at
+  channel creation. `BufferPolicy::Reject` makes async and blocking sends return
+  `SendError::Full` immediately instead of waiting.
+- Split `SendError` into `Full` and `Closed` variants.
+
 # Version 2.5.0
 
 - Add `Sender::closed()` (#102)

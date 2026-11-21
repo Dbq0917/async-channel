@@ -368,6 +368,61 @@ fn close_wakes_sender() {
         .run();
 }
 
+// A sender blocked on a full channel must fail immediately once every receiver
+// is dropped, instead of staying parked forever. A timeout turns a hang into a
+// test failure rather than blocking the whole suite.
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn drop_all_receivers_wakes_full_blocked_sender() {
+    let (s, r) = bounded(1);
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    let handle = std::thread::spawn(move || {
+        // Fill the only slot, then block waiting for room.
+        future::block_on(s.send(1)).unwrap();
+        let result = future::block_on(s.send(2));
+        tx.send(result).unwrap();
+    });
+
+    // Make sure the second send is actually waiting before the receivers go.
+    sleep(ms(300));
+    drop(r);
+
+    let result = rx
+        .recv_timeout(ms(3000))
+        .expect("blocked sender was not woken when all receivers dropped");
+    assert_eq!(result, Err(SendError(2)));
+    handle.join().unwrap();
+}
+
+// Same guarantee for the blocking `send_blocking` strategy and cloned
+// receivers: the wait only ends in an error after the *last* receiver is gone.
+#[cfg(all(feature = "std", not(target_family = "wasm")))]
+#[test]
+fn drop_last_cloned_receiver_wakes_send_blocking() {
+    let (s, r1) = bounded(1);
+    let r2 = r1.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    let handle = std::thread::spawn(move || {
+        s.send_blocking(1).unwrap();
+        let result = s.send_blocking(2);
+        tx.send(result).unwrap();
+    });
+
+    sleep(ms(300));
+    drop(r1);
+    // One receiver is still alive, so the blocked send must keep waiting.
+    assert!(rx.recv_timeout(ms(200)).is_err());
+
+    drop(r2);
+    let result = rx
+        .recv_timeout(ms(3000))
+        .expect("send_blocking was not woken when the last receiver dropped");
+    assert_eq!(result, Err(SendError(2)));
+    handle.join().unwrap();
+}
+
 #[cfg(not(target_family = "wasm"))]
 #[test]
 fn close_wakes_receiver() {

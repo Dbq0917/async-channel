@@ -11,6 +11,10 @@
 //!
 //! When all [`Sender`]s or all [`Receiver`]s are dropped, the channel becomes closed. When a
 //! channel is closed, no more messages can be sent, but remaining messages can still be received.
+//! Closing never discards buffered messages: every message enqueued before the close is
+//! delivered, and receivers observe the closed signal only after the backlog has been drained.
+//! Closing is immediate - it only flips the channel state and wakes blocked operations, without
+//! waiting for the backlog to be received.
 //!
 //! The channel can also be closed manually by calling [`Sender::close()`] or
 //! [`Receiver::close()`].
@@ -370,7 +374,11 @@ impl<T> Sender<T> {
     ///
     /// Returns `true` if this call has closed the channel and it was not closed already.
     ///
-    /// The remaining messages can still be received.
+    /// The remaining messages can still be received: every message enqueued before this call is
+    /// delivered, and receivers get the closed signal only after the backlog is drained.
+    ///
+    /// This method returns immediately. It only flips the channel state and wakes blocked
+    /// operations; it does not wait for the backlog to be received.
     ///
     /// # Examples
     ///
@@ -715,7 +723,11 @@ impl<T> Receiver<T> {
     ///
     /// Returns `true` if this call has closed the channel and it was not closed already.
     ///
-    /// The remaining messages can still be received.
+    /// The remaining messages can still be received: every message enqueued before this call is
+    /// delivered, and receivers get the closed signal only after the backlog is drained.
+    ///
+    /// This method returns immediately. It only flips the channel state and wakes blocked
+    /// operations; it does not wait for the backlog to be received.
     ///
     /// # Examples
     ///

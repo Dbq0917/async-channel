@@ -250,17 +250,20 @@ fn send_after_close() {
 #[cfg(not(target_family = "wasm"))]
 #[test]
 fn recv_after_close() {
-    let (s, r) = bounded(100);
+    const COUNT: i32 = 500;
 
-    future::block_on(s.send(1)).unwrap();
-    future::block_on(s.send(2)).unwrap();
-    future::block_on(s.send(3)).unwrap();
+    let (s, r) = bounded(COUNT as usize);
 
-    drop(s);
+    for i in 0..COUNT {
+        future::block_on(s.send(i)).unwrap();
+    }
 
-    assert_eq!(future::block_on(r.recv()), Ok(1));
-    assert_eq!(future::block_on(r.recv()), Ok(2));
-    assert_eq!(future::block_on(r.recv()), Ok(3));
+    assert!(s.close());
+
+    // Every message enqueued before the close must be delivered, in order.
+    for i in 0..COUNT {
+        assert_eq!(future::block_on(r.recv()), Ok(i));
+    }
     assert_eq!(future::block_on(r.recv()), Err(RecvError));
 }
 

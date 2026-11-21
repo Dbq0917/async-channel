@@ -550,3 +550,97 @@ fn weak() {
         assert!(weak_r.upgrade().is_none());
     }
 }
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn try_send_close_race_no_lost_messages() {
+    use std::sync::Arc;
+
+    const ROUNDS: usize = 16;
+    const SENDERS: usize = 4;
+    const DRAINERS: usize = 2;
+    const PER_SENDER: usize = 50_000;
+
+    for cap in [1usize, 2, 7, 64] {
+        for _ in 0..ROUNDS {
+            let (s, r) = bounded::<usize>(cap);
+            let post_close_sender = s.clone();
+
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let rejected = Arc::new(AtomicUsize::new(0));
+            let received = Arc::new(AtomicUsize::new(0));
+
+            std::thread::scope(|scope| {
+                for _ in 0..SENDERS {
+                    let s = s.clone();
+                    let accepted = accepted.clone();
+                    let rejected = rejected.clone();
+                    scope.spawn(move || {
+                        for _ in 0..PER_SENDER {
+                            match s.try_send(0usize) {
+                                Ok(()) => {
+                                    accepted.fetch_add(1, Ordering::SeqCst);
+                                }
+                                Err(TrySendError::Closed(_)) => {
+                                    rejected.fetch_add(1, Ordering::SeqCst);
+                                }
+                                // A full channel is not a delivery decision; retry later.
+                                Err(TrySendError::Full(_)) => {
+                                    std::thread::yield_now();
+                                }
+                            }
+                        }
+                    });
+                }
+
+                for _ in 0..DRAINERS {
+                    let r = r.clone();
+                    let received = received.clone();
+                    scope.spawn(move || loop {
+                        match r.try_recv() {
+                            Ok(_) => {
+                                received.fetch_add(1, Ordering::SeqCst);
+                            }
+                            Err(TryRecvError::Empty) => std::thread::yield_now(),
+                            Err(TryRecvError::Closed) => break,
+                        }
+                    });
+                }
+
+                // Close races with the in-flight non-blocking sends.
+                scope.spawn(move || {
+                    std::thread::yield_now();
+                    s.close();
+                });
+            });
+
+            // Every sender has exited; drain whatever the close left behind.
+            let mut leftover = 0usize;
+            while r.try_recv().is_ok() {
+                leftover += 1;
+            }
+
+            let accepted = accepted.load(Ordering::SeqCst);
+            let rejected = rejected.load(Ordering::SeqCst);
+            let delivered = received.load(Ordering::SeqCst) + leftover;
+            let lost = accepted - delivered;
+
+            eprintln!(
+                "cap={cap}: accepted={accepted}, rejected_after_close={rejected}, \
+                 delivered={delivered}, lost={lost}"
+            );
+
+            assert_eq!(
+                lost, 0,
+                "cap={cap}: {accepted} accepted but only {delivered} delivered \
+                 ({rejected} rejected after close)"
+            );
+            assert_eq!(r.try_recv(), Err(TryRecvError::Closed));
+            // Once closed, every further non-blocking send must be refused.
+            assert!(matches!(
+                post_close_sender.try_send(0),
+                Err(TrySendError::Closed(_))
+            ));
+        }
+    }
+}
